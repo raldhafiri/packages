@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import 'dart:html' as html;
+import 'package:web/web.dart' as web;
 
 import 'package:flutter/foundation.dart';
 
@@ -30,7 +30,7 @@ class ZoomLevelCapability {
   final double maximum;
 
   /// The video track capable of configuring the zoom level.
-  final html.MediaStreamTrack videoTrack;
+  final web.MediaStreamTrack videoTrack;
 
   @override
   bool operator ==(Object other) {

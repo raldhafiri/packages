@@ -2,14 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import 'dart:html' as html;
+import 'dart:js_interop';
+import 'dart:js_interop_unsafe';
 
 import 'package:camera_platform_interface/camera_platform_interface.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:web/web.dart' as web;
 
 import 'camera.dart';
-import 'shims/dart_js_util.dart';
 import 'types/types.dart';
 
 /// A service to fetch, map camera settings and
@@ -20,19 +21,15 @@ class CameraService {
 
   /// The current browser window used to access media devices.
   @visibleForTesting
-  html.Window? window = html.window;
-
-  /// The utility to manipulate JavaScript interop objects.
-  @visibleForTesting
-  JsUtil jsUtil = JsUtil();
+  web.Window? window = web.window;
 
   /// Returns a media stream associated with the camera device
   /// with [cameraId] and constrained by [options].
-  Future<html.MediaStream> getMediaStreamForOptions(
+  Future<web.MediaStream> getMediaStreamForOptions(
     CameraOptions options, {
     int cameraId = 0,
   }) async {
-    final html.MediaDevices? mediaDevices = window?.navigator.mediaDevices;
+    final web.MediaDevices? mediaDevices = window?.navigator.mediaDevices;
 
     // Throw a not supported exception if the current browser window
     // does not support any media devices.
@@ -44,9 +41,12 @@ class CameraService {
     }
 
     try {
-      final Map<String, dynamic> constraints = options.toJson();
-      return await mediaDevices.getUserMedia(constraints);
-    } on html.DomException catch (e) {
+      final web.MediaStreamConstraints constraints = web.MediaStreamConstraints(
+        audio: options.audio.toJson().toJSBox,
+        video: options.video.toJson().toJSBox,
+      );
+      return await mediaDevices.getUserMedia(constraints).toDart;
+    } on web.DOMException catch (e) {
       switch (e.name) {
         case 'NotFoundError':
         case 'DevicesNotFoundError':
@@ -120,12 +120,11 @@ class CameraService {
   ZoomLevelCapability getZoomLevelCapabilityForCamera(
     Camera camera,
   ) {
-    final html.MediaDevices? mediaDevices = window?.navigator.mediaDevices;
-    final Map<dynamic, dynamic>? supportedConstraints =
-        mediaDevices?.getSupportedConstraints();
+    final web.MediaDevices? mediaDevices = window?.navigator.mediaDevices;
+    final web.MediaTrackSupportedConstraints? supportedConstraints = mediaDevices?.getSupportedConstraints();
+
     final bool zoomLevelSupported =
-        supportedConstraints?[ZoomLevelCapability.constraintName] as bool? ??
-            false;
+        supportedConstraints?.getProperty(ZoomLevelCapability.constraintName.toJS) as bool? ?? false;
 
     if (!zoomLevelSupported) {
       throw CameraWebException(
@@ -135,26 +134,19 @@ class CameraService {
       );
     }
 
-    final List<html.MediaStreamTrack> videoTracks =
-        camera.stream?.getVideoTracks() ?? <html.MediaStreamTrack>[];
+    final List<web.MediaStreamTrack> videoTracks = camera.stream?.getVideoTracks().toDart ?? <web.MediaStreamTrack>[];
 
     if (videoTracks.isNotEmpty) {
-      final html.MediaStreamTrack defaultVideoTrack = videoTracks.first;
-
-      /// The zoom level capability is represented by MediaSettingsRange.
-      /// See: https://developer.mozilla.org/en-US/docs/Web/API/MediaSettingsRange
-      final Object zoomLevelCapability = defaultVideoTrack
-                  .getCapabilities()[ZoomLevelCapability.constraintName]
-              as Object? ??
-          <dynamic, dynamic>{};
+      final web.MediaStreamTrack defaultVideoTrack = videoTracks.first;
 
       // The zoom level capability is a nested JS object, therefore
       // we need to access its properties with the js_util library.
       // See: https://api.dart.dev/stable/2.13.4/dart-js_util/getProperty.html
-      final num? minimumZoomLevel =
-          jsUtil.getProperty(zoomLevelCapability, 'min') as num?;
-      final num? maximumZoomLevel =
-          jsUtil.getProperty(zoomLevelCapability, 'max') as num?;
+      final JSObject? zoomLevelCapability =
+          defaultVideoTrack.getSettings().getProperty(ZoomLevelCapability.constraintName.toJS);
+      ;
+      final num? minimumZoomLevel = zoomLevelCapability?.getProperty('min'.toJS) as num?;
+      final num? maximumZoomLevel = zoomLevelCapability?.getProperty('max'.toJS) as num?;
 
       if (minimumZoomLevel != null && maximumZoomLevel != null) {
         return ZoomLevelCapability(
@@ -180,8 +172,8 @@ class CameraService {
 
   /// Returns a facing mode of the [videoTrack]
   /// (null if the facing mode is not available).
-  String? getFacingModeForVideoTrack(html.MediaStreamTrack videoTrack) {
-    final html.MediaDevices? mediaDevices = window?.navigator.mediaDevices;
+  String? getFacingModeForVideoTrack(web.MediaStreamTrack videoTrack) {
+    final web.MediaDevices? mediaDevices = window?.navigator.mediaDevices;
 
     // Throw a not supported exception if the current browser window
     // does not support any media devices.
@@ -193,10 +185,7 @@ class CameraService {
     }
 
     // Check if the camera facing mode is supported by the current browser.
-    final Map<dynamic, dynamic> supportedConstraints =
-        mediaDevices.getSupportedConstraints();
-    final bool facingModeSupported =
-        supportedConstraints[_facingModeKey] as bool? ?? false;
+    final bool facingModeSupported = mediaDevices.getSupportedConstraints().facingMode;
 
     // Return null if the facing mode is not supported.
     if (!facingModeSupported) {
@@ -209,10 +198,9 @@ class CameraService {
     //
     // MediaTrackSettings:
     // https://developer.mozilla.org/en-US/docs/Web/API/MediaTrackSettings
-    final Map<dynamic, dynamic> videoTrackSettings = videoTrack.getSettings();
-    final String? facingMode = videoTrackSettings[_facingModeKey] as String?;
 
-    if (facingMode == null) {
+    final String? facingMode = videoTrack.getSettings().facingMode;
+    if (facingMode == null || facingMode.isEmpty) {
       // If the facing mode does not exist in the video track settings,
       // check for the facing mode in the video track capabilities.
       //
@@ -223,28 +211,12 @@ class CameraService {
       //
       // The method may not be supported on Firefox.
       // See: https://developer.mozilla.org/en-US/docs/Web/API/MediaStreamTrack/getCapabilities#browser_compatibility
-      if (!jsUtil.hasProperty(videoTrack, 'getCapabilities')) {
+      if (!videoTrack.has('getCapabilities')) {
         // Return null if the video track capabilities are not supported.
         return null;
       }
 
-      final Map<dynamic, dynamic> videoTrackCapabilities =
-          videoTrack.getCapabilities();
-
-      // A list of facing mode capabilities as
-      // the camera may support multiple facing modes.
-      final List<String> facingModeCapabilities = List<String>.from(
-          (videoTrackCapabilities[_facingModeKey] as List<dynamic>?)
-                  ?.cast<String>() ??
-              <String>[]);
-
-      if (facingModeCapabilities.isNotEmpty) {
-        final String facingModeCapability = facingModeCapabilities.first;
-        return facingModeCapability;
-      } else {
-        // Return null if there are no facing mode capabilities.
-        return null;
-      }
+      return videoTrack.getSettings().facingMode;
     }
 
     return facingMode;
